@@ -1,0 +1,53 @@
+name: Build QQRepeatFresh
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew install ldid xz make dpkg || true
+
+      - name: Setup Theos
+        run: |
+          sudo rm -rf /opt/theos
+          sudo git clone --recursive https://github.com/theos/theos.git /opt/theos
+          sudo git clone --depth 1 https://github.com/theos/sdks.git /opt/theos/sdks
+
+      - name: Build
+        run: |
+          export THEOS=/opt/theos
+          rm -rf .theos
+          make clean || true
+          make -j4 FINALPACKAGE=1 2>&1 | tee build.log
+          cp build.log out_build.log 2>/dev/null || true
+
+      - name: Show build log on failure
+        if: failure()
+        run: |
+          echo "===== build.log ====="
+          cat build.log || true
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p out
+          find .theos -name '*.dylib' -exec cp {} out/ \;
+          find . -maxdepth 1 -name '*.deb' -exec cp {} out/ \;
+          ls -l out
+          cd out && sha256sum * > SHA256SUMS 2>/dev/null || shasum -a 256 * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: QQRepeatFresh-artifacts
+          path: out/
+          if-no-files-found: error

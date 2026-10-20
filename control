@@ -1,0 +1,9 @@
+Package: com.qqrepeat.fresh
+Name: QQRepeatFresh
+Version: 0.2.0
+Architecture: iphoneos-arm
+Description: Double-tap-to-repeat chat message, freshly extracted from QQ Clean's QQCK.repeater module.
+Maintainer: xiaofeifei996
+Author: xiaofeifei996
+Section: Tweaks
+Depends: mobilesubstrate

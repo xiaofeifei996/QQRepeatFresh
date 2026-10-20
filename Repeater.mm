@@ -605,7 +605,6 @@ static void QQRPInstallInheritedLayout(const char *name) {
 }
 
 // QQRPScanUI
-static int gLastClassCount = -1;
 
 static void QQRPScanUI(void) {
     @try {

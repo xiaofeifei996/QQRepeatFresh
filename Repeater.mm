@@ -333,7 +333,7 @@ static id QQRPDirectRecordFromCell(UIView *view) {
 
 // QQRPRecordForCell(view) — view 即被 hook 的 NTAIOCellView 系 cell 内容视图:
 //   先直接判 view 本身 (原版再把 record 缓存到 view 上; 这版不做缓存, 规避复用错位)
-static id QQRPRecordForCell(UIView *view) {
+__attribute__((unused)) static id QQRPRecordForCell(UIView *view) {
     if (!QQRPEnabled()) return nil;
     if (!view) return nil;
 
@@ -656,7 +656,7 @@ static void QQRPHookCellClass(Class cls) {
 }
 
 // 找基类 -> 子孙判定
-static BOOL QQRPClassIsDescendant(Class cls, Class base) {
+__attribute__((unused)) static BOOL QQRPClassIsDescendant(Class cls, Class base) {
     if (!cls || !base) return NO;
     for (Class c = cls; c; c = class_getSuperclass(c)) {
         if (c == base) return YES;

@@ -28,10 +28,9 @@ jobs:
         run: |
           set -o pipefail
           export THEOS=/opt/theos
-          rm -rf .theos
           make clean || true
           make -j4 FINALPACKAGE=1 2>&1 | tee build.log
-          cp build.log out_build.log 2>/dev/null || true
+          make package FINALPACKAGE=1 2>&1 | tee -a build.log || true
 
       - name: Show build log on failure
         if: failure()
@@ -41,12 +40,22 @@ jobs:
 
       - name: Collect artifacts
         run: |
+          set -e
           mkdir -p out
-          find .theos -name '*.dylib' -exec cp {} out/ \;
-          find . -maxdepth 1 -name '*.deb' -exec cp {} out/ \;
+          FAT=".theos/_/Library/MobileSubstrate/DynamicLibraries/QQRepeatFresh.dylib"
+          if [ -f "$FAT" ]; then
+            cp "$FAT" out/QQRepeatFresh.dylib
+          else
+            echo "staged dylib not found, searching..."
+            find .theos -name 'QQRepeatFresh.dylib' -print
+            FIRST=$(find .theos -name 'QQRepeatFresh.dylib' | head -1)
+            cp "$FIRST" out/QQRepeatFresh.dylib
+          fi
           ls -l out
-          cd out && sha256sum * > SHA256SUMS 2>/dev/null || shasum -a 256 * > SHA256SUMS
-          cat SHA256SUMS
+          lipo -info out/QQRepeatFresh.dylib
+          lipo -archs out/QQRepeatFresh.dylib
+          find . -maxdepth 2 -name '*.deb' -exec cp {} out/ \;
+          cd out && shasum -a 256 * > SHA256SUMS && cat SHA256SUMS
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

@@ -21,6 +21,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <dispatch/dispatch.h>
+#import <stdlib.h>
 
 #define QQRP_VERSION @"0.2.0"
 
@@ -78,6 +79,12 @@ static NSString *QQRPClassStr(id obj) {
     return NSStringFromClass(object_getClass(obj)) ?: @"(null)";
 }
 
+// 返回类型读取 (method_copyReturnType: malloc, 需 free)
+static char *QQRPReturnTypeCopy(Method m) {
+    if (!m) return NULL;
+    return method_copyReturnType(m); // caller frees
+}
+
 // ================= 安全对象读取 =================
 // 只用两种途径: (a) selector 访问器(method_getReturnType=='@' 校验)
 //              (b) KVC valueForKey: (对 weak ivar 安全, 不会 raw deref)
@@ -87,8 +94,10 @@ static id QQRPCallObjectGetter(id obj, SEL sel) {
     if (!obj || !sel) return nil;
     Method m = class_getInstanceMethod(object_getClass(obj), sel);
     if (!m) return nil;
-    const char *rt = method_getReturnType(m);
-    if (!rt || rt[0] != '@') return nil;
+    char *rt = QQRPReturnTypeCopy(m);
+    BOOL ok = (rt && rt[0] == '@');
+    free(rt);
+    if (!ok) return nil;
     id (*send)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
     return send(obj, sel);
 }
@@ -100,8 +109,10 @@ static id QQRPSafeIvar(id obj, NSString *name) {
     SEL sel = NSSelectorFromString(name);
     if ([obj respondsToSelector:sel]) {
         Method m = class_getInstanceMethod(object_getClass(obj), sel);
-        const char *rt = m ? method_getReturnType(m) : NULL;
-        if (rt && rt[0] == '@') {
+        char *rt = QQRPReturnTypeCopy(m);
+        BOOL ok = (rt && rt[0] == '@');
+        free(rt);
+        if (ok) {
             id (*send)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
             @try { return send(obj, sel); } @catch (NSException *e) {}
         }
@@ -118,15 +129,16 @@ static id QQRPValueForKey(id obj, NSString *key) {
 }
 
 // 标量 int 读取 (chatType 这类标量: 第一参数是 int, 必然不能用 id 调!)
-static NSInteger QQRPIntForKey(id obj, NSString *key) {
+__attribute__((unused)) static NSInteger QQRPIntForKey(id obj, NSString *key) {
     if (!obj || key.length == 0) return 0;
     if (![(id)obj isKindOfClass:[NSObject class]]) return 0;
     SEL sel = NSSelectorFromString(key);
     Method m = class_getInstanceMethod(object_getClass(obj), sel);
-    const char *rt = m ? method_getReturnType(m) : NULL;
-    if (m && rt && rt[0] && rt[0] != '@') {
+    char *rts = QQRPReturnTypeCopy(m);
+    char c0 = rts ? rts[0] : 0;
+    free(rts);
+    if (m && c0 && c0 != '@') {
         // 标量整型才允许寄存器读 (i/I/l/L/q/Q/s/S/c/C/B); 浮点返回在 v 寄存器, 不能这样调
-        char c0 = rt[0];
         if (c0 == 'i' || c0 == 'I' || c0 == 'l' || c0 == 'L' || c0 == 'q' || c0 == 'Q' ||
             c0 == 's' || c0 == 'S' || c0 == 'c' || c0 == 'C' || c0 == 'B') {
             long long (*send)(id, SEL) = (long long (*)(id, SEL))objc_msgSend;
@@ -145,9 +157,10 @@ static long long QQRPLongLongForKey(id obj, NSString *key) {
     if (![(id)obj isKindOfClass:[NSObject class]]) return 0;
     SEL sel = NSSelectorFromString(key);
     Method m = class_getInstanceMethod(object_getClass(obj), sel);
-    const char *rt = m ? method_getReturnType(m) : NULL;
-    if (m && rt && rt[0] && rt[0] != '@') {
-        char c0 = rt[0];
+    char *rts = QQRPReturnTypeCopy(m);
+    char c0 = rts ? rts[0] : 0;
+    free(rts);
+    if (m && c0 && c0 != '@') {
         if (c0 == 'i' || c0 == 'I' || c0 == 'l' || c0 == 'L' || c0 == 'q' || c0 == 'Q' ||
             c0 == 's' || c0 == 'S' || c0 == 'c' || c0 == 'C' || c0 == 'B') {
             long long (*send)(id, SEL) = (long long (*)(id, SEL))objc_msgSend;
@@ -155,7 +168,7 @@ static long long QQRPLongLongForKey(id obj, NSString *key) {
         }
         return 0;
     }
-    if (m && rt && rt[0] == '@') {
+    if (m && c0 == '@') {
         id out = QQRPCallObjectGetter(obj, sel);
         if (out && [out isKindOfClass:[NSNumber class]]) return [(NSNumber *)out longLongValue];
         if (out && [out isKindOfClass:[NSString class]]) return [(NSString *)out longLongValue];
@@ -175,8 +188,10 @@ static NSString *QQRPStringForKey(id obj, NSString *key) {
     if (![(id)obj isKindOfClass:[NSObject class]]) return nil;
     SEL sel = NSSelectorFromString(key);
     Method m = class_getInstanceMethod(object_getClass(obj), sel);
-    const char *rt = m ? method_getReturnType(m) : NULL;
-    if (m && rt && rt[0] == '@') {
+    char *rts = QQRPReturnTypeCopy(m);
+    BOOL isObj = (rts && rts[0] == '@');
+    free(rts);
+    if (m && isObj) {
         id out = QQRPCallObjectGetter(obj, sel);
         if (out && [out isKindOfClass:[NSString class]]) return out;
         return nil;
@@ -213,7 +228,6 @@ static id QQRPFindRecordDeep(id obj, int depth, NSMutableSet *visited) {
     if ([visited containsObject:ptr]) return nil;
     [visited addObject:ptr];
 
-    Class cls = object_getClass(obj);
     // 原版 skip 的基础类型必须排除 (valueForKey 误剖字符串/数组)
     if ([obj isKindOfClass:[NSString class]]) return nil;
     if ([obj isKindOfClass:[NSNumber class]]) return nil;

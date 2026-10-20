@@ -23,7 +23,7 @@
 #import <dispatch/dispatch.h>
 #import <stdlib.h>
 
-#define QQRP_VERSION @"0.2.1"
+#define QQRP_VERSION @"0.2.2"
 
 // ================= 日志 =================
 
@@ -259,7 +259,9 @@ static id QQRPFindRecordDeep(id obj, int depth, NSMutableSet *visited) {
         kNames = @[@"viewModel", @"record", @"msgRecord", @"_record",
                    @"msg", @"message", @"msgData", @"messageModel",
                    @"contentVM", @"contentViewModel", @"cellViewModel",
-                   @"cellModel", @"dataModel", @"model"];
+                   @"cellModel", @"dataModel", @"model",
+                   @"aioCellViewModel", @"cellView", @"cellVM",
+                   @"messageViewModel", @"viewModels", @"msgViewModel"];
     });
     for (NSString *key in kNames) {
         id val = QQRPSafeIvar(obj, key);
@@ -465,17 +467,37 @@ static void QQRPRepeatRecord(id record) {
 // 1) 自身/子视图的 viewModel -> FindRecord
 // 2) UITableViewCell: contentView 子树(深度<=4) 里找带 viewModel 的视图
 // 3) 兜底 BFS
+static NSArray *QQRPKeyNames(void) {
+    static NSArray *names = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        names = @[@"viewModel", @"record", @"msgRecord", @"_record",
+                  @"msg", @"message", @"msgData", @"messageModel",
+                  @"contentVM", @"contentViewModel", @"cellViewModel",
+                  @"cellModel", @"dataModel", @"model",
+                  @"aioCellViewModel", @"cellView", @"cellVM",
+                  @"messageViewModel", @"viewModels", @"msgViewModel"];
+    });
+    return names;
+}
+
 static id QQRPRecordFromViewShallow(UIView *v, int depth) {
     if (!v || depth > 4) return nil;
-    id vm = QQRPSafeIvar(v, @"viewModel");
-    if (!vm) vm = QQRPValueForKey(v, @"viewModel");
-    if (vm) {
-        id r = QQRPFindRecord(vm);
-        if (QQRPLooksLikeRecord(r)) return r;
+    for (NSString *key in QQRPKeyNames()) {
+        id val = QQRPSafeIvar(v, key);
+        if (!val) val = QQRPValueForKey(v, key);
+        if (!val || val == v) continue;
+        if (QQRPLooksLikeRecord(val)) {
+            QQRPLog(@"view %@ key=%@ -> record %@", QQRPClassStr(v), key, QQRPClassStr(val));
+            return val;
+        }
+        id r = QQRPFindRecord(val);
+        if (QQRPLooksLikeRecord(r)) {
+            QQRPLog(@"view %@ key=%@ -> vm %@ -> record %@", QQRPClassStr(v), key,
+                    QQRPClassStr(val), QQRPClassStr(r));
+            return r;
+        }
     }
-    id rr = QQRPSafeIvar(v, @"record");
-    if (!QQRPLooksLikeRecord(rr)) rr = QQRPValueForKey(v, @"record");
-    if (QQRPLooksLikeRecord(rr)) return rr;
     for (UIView *sub in v.subviews) {
         id r = QQRPRecordFromViewShallow(sub, depth + 1);
         if (r) return r;

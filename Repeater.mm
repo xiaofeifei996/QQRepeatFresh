@@ -23,7 +23,7 @@
 #import <dispatch/dispatch.h>
 #import <stdlib.h>
 
-#define QQRP_VERSION @"0.2.0"
+#define QQRP_VERSION @"0.2.1"
 
 // ================= 日志 =================
 
@@ -459,9 +459,50 @@ static void QQRPRepeatRecord(id record) {
     }
 }
 
+// ================= 从 cell / 视图解析 record =================
+
+// 从任意 view 起, 尝试常见路径取 record:
+// 1) 自身/子视图的 viewModel -> FindRecord
+// 2) UITableViewCell: contentView 子树(深度<=4) 里找带 viewModel 的视图
+// 3) 兜底 BFS
+static id QQRPRecordFromViewShallow(UIView *v, int depth) {
+    if (!v || depth > 4) return nil;
+    id vm = QQRPSafeIvar(v, @"viewModel");
+    if (!vm) vm = QQRPValueForKey(v, @"viewModel");
+    if (vm) {
+        id r = QQRPFindRecord(vm);
+        if (QQRPLooksLikeRecord(r)) return r;
+    }
+    id rr = QQRPSafeIvar(v, @"record");
+    if (!QQRPLooksLikeRecord(rr)) rr = QQRPValueForKey(v, @"record");
+    if (QQRPLooksLikeRecord(rr)) return rr;
+    for (UIView *sub in v.subviews) {
+        id r = QQRPRecordFromViewShallow(sub, depth + 1);
+        if (r) return r;
+    }
+    return nil;
+}
+
+static id QQRPRecordFromCellOrView(UIView *view) {
+    if (!view) return nil;
+    id r = QQRPRecordFromViewShallow(view, 0);
+    if (r) return r;
+    UIView *v = view;
+    for (int i = 0; i < 10 && v; ++i, v = v.superview) {
+        if ([v isKindOfClass:[UITableViewCell class]]) {
+            r = QQRPRecordFromViewShallow(((UITableViewCell *)v).contentView, 0);
+            if (r) return r;
+        }
+    }
+    r = QQRPFindRecord(view);
+    if (QQRPLooksLikeRecord(r)) return r;
+    return nil;
+}
+
 // ================= 手势 target =================
 
 @interface QQRepeaterGestureTarget : NSObject <UIGestureRecognizerDelegate>
+@property (nonatomic, weak) UIView *lastTouchView;
 + (instancetype)shared;
 - (void)doubleTap:(UITapGestureRecognizer *)gr;
 @end
@@ -474,32 +515,58 @@ static void QQRPRepeatRecord(id record) {
     return shared;
 }
 
-- (void)doubleTap:(UITapGestureRecognizer *)gr {
-    @try {
-        if (!QQRPEnabled()) return;
-        if (gr.state != UIGestureRecognizerStateEnded) return;
-        UIView *v = gr.view;
-        if (!v) return;
-        id record = QQRPRecordForCell(v);
-        if (!record) {
-            QQRPLog(@"doubleTap: record=nil view=%@", QQRPClassStr(v));
-            return;
-        }
-        QQRPRepeatRecord(record);
-    } @catch (NSException *e) {
-        QQRPLog(@"doubleTap exception: %@ (%@)", e.name, e.reason);
-    }
+// 热路径: 只记录 touch.view 弱引用, 不做任何自省
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)g shouldReceiveTouch:(UITouch *)t {
+    if (!QQRPEnabled()) return NO;
+    self.lastTouchView = t.view;
+    return YES;
 }
 
-// 允许别的手势 (长按、点击) 与复读手势共存
+// 允许其他手势 (长按/点击) 同时工作
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)g
 shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)o {
     return YES;
 }
 
-// 热路径: 不做任何视图/ivar 自省 (旧版崩溃栈就在这)
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)g shouldReceiveTouch:(UITouch *)t {
-    return QQRPEnabled();
+- (void)doubleTap:(UITapGestureRecognizer *)gr {
+    @try {
+        if (!QQRPEnabled()) return;
+        if (gr.state != UIGestureRecognizerStateEnded) return;
+
+        UIView *hostView = gr.view;
+        UIView *hit = self.lastTouchView;
+
+        UITableView *table = nil;
+        if ([hostView isKindOfClass:[UITableView class]]) {
+            table = (UITableView *)hostView;
+        } else if (hit) {
+            UIView *v = hit;
+            while (v && ![v isKindOfClass:[UITableView class]]) v = v.superview;
+            if ([v isKindOfClass:[UITableView class]]) table = (UITableView *)v;
+        }
+
+        UITableViewCell *cell = nil;
+        NSIndexPath *ip = nil;
+        if (table) {
+            CGPoint p = hit ? [hit convertPoint:CGPointZero toView:table] : [gr locationInView:table];
+            ip = [table indexPathForRowAtPoint:p];
+            if (ip) cell = [table cellForRowAtIndexPath:ip];
+        }
+
+        QQRPLog(@"doubleTap table=%@ ip=%@ cell=%@ hit=%@",
+                QQRPClassStr(table), ip, QQRPClassStr(cell), QQRPClassStr(hit));
+
+        id record = cell ? QQRPRecordFromCellOrView(cell) : nil;
+        if (!record) record = QQRPRecordFromCellOrView(hit);
+        if (!record) {
+            QQRPLog(@"record miss (cell=%@ hit=%@)", QQRPClassStr(cell), QQRPClassStr(hit));
+            return;
+        }
+        QQRPLog(@"record=%@ msgId=%lld", QQRPClassStr(record), QQRPMsgIdOf(record));
+        QQRPRepeatRecord(record);
+    } @catch (NSException *e) {
+        QQRPLog(@"doubleTap exception: %@ (%@)", e.name, e.reason);
+    }
 }
 @end
 
@@ -600,41 +667,66 @@ static BOOL QQRPClassIsDescendant(Class cls, Class base) {
 // QQRPInstallInheritedLayout("NTAIOCellView")
 static void QQRPInstallInheritedLayout(const char *name) {
     Class cls = objc_getClass(name);
-    if (!cls) return;
-    QQRPHookCellClass(cls);   // 直接 hook 该类自身的 layoutSubviews
+    if (!cls) {
+        QQRPLog(@"installInheritedLayout: class %s 不存在", name);
+        return;
+    }
+    QQRPHookCellClass(cls);
 }
 
-// QQRPScanUI
-
+// QQRPScanUI —— 不再硬依赖某个基类: 扫全部类名里带 AIO/CellView/NTAIOCell 的 UIView 子类
 static void QQRPScanUI(void) {
     @try {
         if (!QQRPEnabled()) return;
         QQRPInstallInheritedLayout("NTAIOCellView");
 
-        Class base = objc_getClass("NTBaseAIO.NTAIOBaseCellView");
-        if (!base) base = objc_getClass("NTAIOCellView");
-        if (!base) return;
+        Class b1 = objc_getClass("NTBaseAIO.NTAIOBaseCellView");
+        Class b2 = objc_getClass("NTAIOBaseCellView");
+        Class b3 = objc_getClass("NTAIOCellView");
+        QQRPLog(@"scanUI bases: NTBaseAIO.NTAIOBaseCellView=%@ NTAIOBaseCellView=%@ NTAIOCellView=%@",
+                b1 ? @"Y" : @"N", b2 ? @"Y" : @"N", b3 ? @"Y" : @"N");
 
-        static unsigned int gLastCount = 0;
         unsigned int count = 0;
         Class *list = objc_copyClassList(&count);
         if (!list || !count) return;
-        if (gLastCount && gLastCount == count) {
-            // 类列表数量没变, 不重扫 (原版同类策略)
-            free(list);
-            return;
-        }
-        gLastCount = count;
+        int matched = 0;
         for (unsigned int i = 0; i < count; i++) {
             Class c = list[i];
-            if (!QQRPClassIsDescendant(c, base)) continue;
-            if (c == base) continue;  // base 本身在 InstallInheritedLayout 已 hook
+            if (!c) continue;
+            NSString *nm = NSStringFromClass(c);
+            if (!nm || nm.length == 0) continue;
+            BOOL related = [nm containsString:@"AIO"] || [nm containsString:@"CellView"] ||
+                           [nm containsString:@"NTAIOCell"] || [nm containsString:@"ChatCell"];
+            if (!related) continue;
+            if (![c isSubclassOfClass:[UIView class]]) continue;
+            matched++;
+            if (matched <= 40) QQRPLog(@"candidate[%d] %@", matched, nm);
             QQRPHookCellClass(c);
         }
+        QQRPLog(@"scanUI done classes=%u matched=%d", count, matched);
         free(list);
     } @catch (NSException *e) {
         QQRPLog(@"scanUI exception %@ (%@)", e.name, e.reason);
     }
+}
+
+// 挂手势到 root 下所有 UITableView (只挂一次/表)
+static void QQRPAttachToTables(UIView *root) {
+    if (!root) return;
+    NSMutableArray *stack = [NSMutableArray arrayWithObject:root];
+    int n = 0, tables = 0;
+    while (stack.count && n < 3000) {
+        UIView *v = stack.lastObject;
+        [stack removeLastObject];
+        n++;
+        if ([v isKindOfClass:[UITableView class]]) {
+            QQRPEnsureGesture(v);
+            tables++;
+            continue;
+        }
+        for (UIView *sub in v.subviews) [stack addObject:sub];
+    }
+    if (tables > 0) QQRPLog(@"attachToTables: %d tables under %@", tables, QQRPClassStr(root));
 }
 
 // ================= UIViewController viewDidAppear hook =================
@@ -656,18 +748,22 @@ static void QQRPHookViewControllerViewDidAppear(void) {
             QQRPLog(@"viewDidAppear orig exception %@", e.name);
         }
         @try {
+            if (!QQRPEnabled()) return;
             NSString *nm = NSStringFromClass(object_getClass(selfSelf));
-            if (!QQRPEnabled() || !nm) return;
-            if (![nm containsString:@"AIOChat"] && ![nm containsString:@"NTAIOChatTable"]) return;
+            // 不做类名筛选: 任何 VC 出现时都找一下 UITableView, 只挂表(有 assoc 去重)
+            UIView *root = [(UIViewController *)selfSelf view];
+            if (root) QQRPAttachToTables(root);
             double now = QQRPNow();
-            if (gLastVCAppearAt != 0.0 && (now - gLastVCAppearAt) < 1.5) return;
-            gLastVCAppearAt = now;
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{
-                @try { QQRPScanUI(); } @catch (NSException *e) {
-                    QQRPLog(@"scanUI after exception %@", e.name);
-                }
-            });
+            if (gLastVCAppearAt == 0.0 || (now - gLastVCAppearAt) > 2.0) {
+                gLastVCAppearAt = now;
+                if (nm) QQRPLog(@"vc appeared: %@", nm);
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    @try { QQRPScanUI(); } @catch (NSException *e) {
+                        QQRPLog(@"scanUI after exception %@", e.name);
+                    }
+                });
+            }
         } @catch (NSException *e) {
             QQRPLog(@"viewDidAppear hook exception %@", e.name);
         }
@@ -682,15 +778,16 @@ static void QQRPInstallOnce(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         QQRPLog(@"QQRepeatOnly %@ init (fresh-build)", QQRP_VERSION);
-        // 显示 GPU? no. 先 vc hook, 后 QQ.scanUI 一次
         QQRPHookViewControllerViewDidAppear();
-        // 部分启动已在 AIO 里的场景: 启动后 1.2s 再扫一次
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            @try { QQRPScanUI(); } @catch (NSException *e) {
-                QQRPLog(@"startup scanUI exception %@", e.name);
-            }
-        });
+        // 启动后多轮扫描: 类可能在框架懒加载后才出现
+        for (int i = 1; i <= 6; i++) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 1.5 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                @try { QQRPScanUI(); } @catch (NSException *e) {
+                    QQRPLog(@"startup scanUI exception %@", e.name);
+                }
+            });
+        }
     });
 }
 

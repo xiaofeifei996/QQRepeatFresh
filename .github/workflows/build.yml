@@ -20,7 +20,11 @@ jobs:
         run: |
           sudo rm -rf /opt/theos
           sudo git clone --recursive https://github.com/theos/theos.git /opt/theos
-          sudo git clone --depth 1 https://github.com/theos/sdks.git /opt/theos/sdks
+          if [ -z "$(ls -A /opt/theos/sdks 2>/dev/null)" ]; then
+            sudo rm -rf /opt/theos/sdks
+            sudo git clone --depth 1 https://github.com/theos/sdks.git /opt/theos/sdks
+          fi
+          ls /opt/theos/sdks | head
 
       - name: Build
         run: |

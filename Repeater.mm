@@ -47,7 +47,7 @@ static void QQRPLog(NSString *fmt, ...) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{ df = [[NSDateFormatter alloc] init]; df.dateFormat = @"MM-dd HH:mm:ss"; });
     NSString *line = [NSString stringWithFormat:@"[%@] %@\n", [df stringFromDate:[NSDate date]], msg];
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
         NSString *p = QQRPLogPath();
         if (!p) return;
         NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:p];
